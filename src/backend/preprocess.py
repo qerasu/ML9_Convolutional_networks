@@ -1,58 +1,43 @@
 import hashlib
+import glob
+import os
 import pandas as pd
-from pathlib import Path
 from sklearn.model_selection import train_test_split
 
 
-class Preprocessor:
-    SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+CSV_PATH = "../datasets/Train.csv"
+IMAGES_DIR = "../datasets/Images"
 
-    def __init__(
-        self,
-        csv_path="../datasets/Train.csv",
-        images_dir="../datasets/Images",
-        val_fraction=0.33,
-        random_state=42,
-    ):
-        self.csv_path = Path(csv_path)
-        self.images_dir = Path(images_dir)
+
+class Preprocessor:
+    def __init__(self, csv_path=CSV_PATH, images_dir=IMAGES_DIR, val_fraction=0.33, random_state=42):
+        self.csv_path = csv_path
+        self.images_dir = images_dir
         self.val_fraction = val_fraction
         self.random_state = random_state
+        self._path_cache = None
 
 
-    @staticmethod
-    def _to_dict(series):
-        return {str(k): int(v) for k, v in series.to_dict().items()}
-
-
-    # reducing memory pressure
     @staticmethod
     def _file_hash(path):
-        digest = hashlib.md5()
-        with path.open("rb") as file:
-            for chunk in iter(lambda: file.read(8192), b""):
+        digest = hashlib.blake2b(digest_size=16)
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(8192), b""):
                 digest.update(chunk)
 
         return digest.hexdigest()
 
 
-    def _load(self):
-        df = pd.read_csv(self.csv_path)
-
-        rows_before = df.shape[0]
-        df = df.drop_duplicates(subset=["img_IDS"], keep="first").reset_index(drop=True)
-        print(f"Removed {rows_before - df.shape[0]} duplicate rows by img_IDS.")
-
-        return df
-
-
     def _stem_to_path(self):
+        if self._path_cache is not None:
+            return self._path_cache
+
         mapping = {}
-        for ext in self.SUPPORTED_EXTENSIONS:
-            for path in self.images_dir.glob(f"*{ext}"):
-                mapping[path.stem] = path
-            for path in self.images_dir.glob(f"*{ext.upper()}"):
-                mapping[path.stem] = path
+        for path in glob.glob(os.path.join(self.images_dir, "*.jpg")):
+            stem = os.path.splitext(os.path.basename(path))[0]
+            mapping[stem] = path
+
+        self._path_cache = mapping
 
         return mapping
 
@@ -60,100 +45,122 @@ class Preprocessor:
     def _attach_paths(self, df):
         df = df.copy()
         df["filepath"] = df["img_IDS"].map(self._stem_to_path())
+
         return df
 
 
     def _find_mislabeled_groups(self, df):
-        conflict_hashes = df.groupby("img_hash")["Label"].nunique()
-        conflict_hashes = conflict_hashes[conflict_hashes > 1].index
+        conflicts = df.groupby("img_hash")["Label"].nunique()
+        conflicts = conflicts[conflicts > 1].index
 
         groups = []
-        for hash_value in conflict_hashes:
-            group_df = df[df["img_hash"] == hash_value][["img_IDS", "Label"]]
-            groups.append(
-                {
-                    "hash": hash_value,
-                    "samples": [
-                        {"img_IDS": str(row["img_IDS"]), "Label": int(row["Label"])}
-                        for _, row in group_df.iterrows()
-                    ],
-                }
-            )
+        for h in conflicts:
+            rows = df.loc[df["img_hash"] == h, ["img_IDS", "Label"]]
+            groups.append({
+                "hash": h,
+                "samples": [
+                    {"img_IDS": str(r["img_IDS"]), "Label": int(r["Label"])}
+                    for r in rows.to_dict(orient="records")
+                ],
+            })
 
         return groups
 
 
-    def _drop_pixel_duplicates(self, df):
-        df = self._attach_paths(df)
-        missing_files = int(df["filepath"].isna().sum())
-        if missing_files:
-            print(f"[WARN] {missing_files} rows do not have matching image files and will be dropped.")
+    def _load_and_dedup_ids(self):
+        raw_df = pd.read_csv(self.csv_path)
+
+        before = len(raw_df)
+        dedup_df = raw_df.drop_duplicates(subset=["img_IDS"], keep="first").reset_index(drop=True)
+        print(f"Removed {before - len(dedup_df)} duplicate rows by img_IDS.")
+
+        return raw_df, dedup_df
+
+
+    def _clean(self, dedup_df):
+        df = self._attach_paths(dedup_df)
+
+        missing = int(df["filepath"].isna().sum())
+        if missing:
+            print(f"[WARNING] {missing} row(s) have no matching image files — dropped.")
 
         df = df.dropna(subset=["filepath"]).copy()
+
         if df.empty:
-            return df
+            return df, df
 
         df["img_hash"] = df["filepath"].apply(self._file_hash)
+        with_paths_df = df.copy()
 
-        mislabeled_groups = self._find_mislabeled_groups(df)
-        if mislabeled_groups:
-            print(f"[MISLABEL] Found {len(mislabeled_groups)} potential mislabeled groups.")
+        mislabeled = self._find_mislabeled_groups(df)
+        if mislabeled:
+            print(f"[MISLABEL] Found {len(mislabeled)} potential mislabeled groups.")
         else:
             print("[MISLABEL] No conflicting labels found.")
 
-        rows_before = df.shape[0]
+        before = len(df)
         df = df.drop_duplicates(subset=["img_hash"], keep="first").reset_index(drop=True)
-        print(f"[DEDUP] Removed {rows_before - df.shape[0]} pixel-identical duplicates.")
+        print(f"[DEDUP] Removed {before - len(df)} pixel-identical duplicates.")
 
-        return df.drop(columns=["filepath", "img_hash"], errors="ignore")
+        clean_df = df.drop(columns=["filepath", "img_hash"])
+
+        return with_paths_df, clean_df
 
 
-    def analyze(self):
-        raw_df = pd.read_csv(self.csv_path)
-        dedup_id_df = raw_df.drop_duplicates(subset=["img_IDS"], keep="first").reset_index(drop=True)
-        with_paths_df = self._attach_paths(dedup_id_df)
-        with_paths_df = with_paths_df.dropna(subset=["filepath"]).copy()
+    def _build_report(self, raw_df, dedup_df, with_paths_df, clean_df):
+        to_dict = lambda s: {str(k): int(v) for k, v in s.to_dict().items()}
 
         report = {
-            "rows_raw": int(raw_df.shape[0]),
-            "removed_duplicate_ids": int(raw_df.shape[0] - dedup_id_df.shape[0]),
-            "rows_with_files": int(with_paths_df.shape[0]),
-            "label_distribution_raw": self._to_dict(raw_df["Label"].value_counts()),
+            "rows_raw": len(raw_df),
+            "removed_duplicate_ids": len(raw_df) - len(dedup_df),
+            "rows_with_files": len(with_paths_df),
+            "label_distribution_raw": to_dict(raw_df["Label"].value_counts()),
         }
 
         if with_paths_df.empty:
-            report["rows_missing_files"] = int(dedup_id_df.shape[0])
+            report["rows_missing_files"] = len(dedup_df)
             report["removed_pixel_duplicates"] = 0
             report["potential_mislabeled_groups"] = []
             report["label_distribution_after_dedup"] = {}
             return report
 
-        with_paths_df["img_hash"] = with_paths_df["filepath"].apply(self._file_hash)
-        dedup_hash_df = with_paths_df.drop_duplicates(subset=["img_hash"], keep="first").reset_index(drop=True)
-        label_counts = self._to_dict(dedup_hash_df["Label"].value_counts())
 
-        report["rows_missing_files"] = int(dedup_id_df.shape[0] - with_paths_df.shape[0])
-        report["removed_pixel_duplicates"] = int(with_paths_df.shape[0] - dedup_hash_df.shape[0])
+        report["rows_missing_files"] = len(dedup_df) - len(with_paths_df)
+        report["removed_pixel_duplicates"] = len(with_paths_df) - len(clean_df)
         report["potential_mislabeled_groups"] = self._find_mislabeled_groups(with_paths_df)
-        report["label_distribution_after_dedup"] = label_counts
+        report["label_distribution_after_dedup"] = to_dict(clean_df["Label"].value_counts())
 
         return report
 
 
+    def analyze(self):
+        raw_df, dedup_df = self._load_and_dedup_ids()
+        with_paths_df, clean_df = self._clean(dedup_df)
+
+        return self._build_report(raw_df, dedup_df, with_paths_df, clean_df)
+
+
     def split(self, return_report=False):
-        df = self._load()
-        df = self._drop_pixel_duplicates(df)
+        raw_df, dedup_df = self._load_and_dedup_ids()
+        with_paths_df, clean_df = self._clean(dedup_df)
+
+        label_counts = clean_df["Label"].value_counts()
+        rare = label_counts[label_counts < 2].index
+        if len(rare) > 0:
+            print(f"[WARNING] Dropping {clean_df['Label'].isin(rare).sum()} samples (too rare for stratify): {list(rare)}")
+            clean_df = clean_df[~clean_df["Label"].isin(rare)].reset_index(drop=True)
 
         train_df, val_df = train_test_split(
-            df,
+            clean_df,
             test_size=self.val_fraction,
             random_state=self.random_state,
-            stratify=df["Label"],
+            stratify=clean_df["Label"],
         )
         train_df = train_df.reset_index(drop=True)
         val_df = val_df.reset_index(drop=True)
 
         if return_report:
-            return train_df, val_df, self.analyze()
+            report = self._build_report(raw_df, dedup_df, with_paths_df, clean_df)
+            return train_df, val_df, report
 
         return train_df, val_df
