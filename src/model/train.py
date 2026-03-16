@@ -10,17 +10,8 @@ def _compute_loss(logits, targets, criterion):
         return criterion(logits, targets)
 
     log_probs = F.log_softmax(logits, dim=1)
+
     return -torch.sum(targets * log_probs) / logits.size(0)
-
-
-def _get_device():
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-
-    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        return torch.device("mps")
-
-    return torch.device("cpu")
 
 
 def train_one_epoch(model, loader, optimizer, criterion, device,
@@ -87,7 +78,7 @@ def evaluate(model, loader, criterion, device):
 
     return {
         "loss": total_loss / max(n_samples, 1),
-        "roc_auc": roc_auc,
+        "roc_auc": roc_auc
     }
 
 
@@ -110,7 +101,7 @@ def train_model(
     if optimizer is not None and lr != 1e-3:
         raise ValueError(
             "Both 'optimizer' and non-default 'lr' were provided. "
-            "'lr' is ignored when 'optimizer' is supplied.",
+            "'lr' is ignored when 'optimizer' is supplied."
         )
 
     print(f"Using device: {device}")

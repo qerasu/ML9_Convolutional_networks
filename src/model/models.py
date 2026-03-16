@@ -5,7 +5,7 @@ import torch.nn as nn
 _LENET_INPUT_SIZE = 64
 
 class LeNet5(nn.Module):
-    def __init__(self, num_classes: int = 9, dropout: float = 0.3):
+    def __init__(self, num_classes=9, dropout=0.3):
         super().__init__()
 
         self.features = nn.Sequential(
@@ -28,7 +28,8 @@ class LeNet5(nn.Module):
             nn.Linear(84, num_classes)
         )
 
-    def forward(self, x: torch.Tensor):
+
+    def forward(self, x):
         if x.shape[2] != _LENET_INPUT_SIZE or x.shape[3] != _LENET_INPUT_SIZE:
             raise ValueError(
                 f"LeNet5 expects {_LENET_INPUT_SIZE}×{_LENET_INPUT_SIZE} input, "
@@ -41,9 +42,9 @@ class LeNet5(nn.Module):
 
 
 def create_pretrained_model(
-    backbone_name: str = "resnet18",
-    num_classes: int = 9,
-    pretrained: bool = True
+    backbone_name = "resnet18",
+    num_classes = 9,
+    pretrained = True
 ):
     return timm.create_model(
         backbone_name,

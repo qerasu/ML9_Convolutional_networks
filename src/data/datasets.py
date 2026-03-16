@@ -18,7 +18,6 @@ class GestureDataset(Dataset):
 
         self.label_to_idx = label_to_idx
 
-        self.num_classes = len(self.label_to_idx)
         self.img_ids = df["img_IDS"].tolist()
         self.labels = df["Label"].tolist()
 
